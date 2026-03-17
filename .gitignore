@@ -1,0 +1,7 @@
+# Ignore all image files in sample_data directory
+sample_data/**/*.jpg
+sample_data/**/*.jpeg
+sample_data/**/*.png
+sample_data/**/*.gif
+sample_data/**/*.bmp
+sample_data/**/*.webp
