@@ -1,66 +1,59 @@
+# test_train.py 完整注释
+
+```python
 # 测试训练模块
 # 训练低光照视频目标检测增强模型 (快速版)
 # 原理：使用采样的小数据集快速验证训练流程
 
-import os  # 操作系统接口，用于文件路径操作和目录创建
-import time  # 时间处理模块，用于记录训练时间和性能分析
-import logging  # 日志模块，用于记录训练过程和错误信息
-import torch  # PyTorch 深度学习框架
-import torch.optim as optim  # 优化器模块，提供 Adam 等优化算法
-from torch.optim.lr_scheduler import CosineAnnealingLR  # 学习率调度器，实现余弦退火
-from torch.utils.data import DataLoader, Subset  # 数据加载器和子集类
-import random  # 随机数生成模块，用于数据采样
-from yolo_transformer import YOLOTransformerLowLight  # 主模型类
-from dataset import LowLightPairDataset  # 数据集类
-from high_res_cache import HighResFeatureCache  # 特征缓存类
-from config import Config  # 配置参数类
+import os  # 操作系统接口
+import time  # 时间处理
+import logging  # 日志模块
+import torch  # PyTorch 框架
+import torch.optim as optim  # 优化器
+from torch.optim.lr_scheduler import CosineAnnealingLR  # 学习率调度器
+from torch.utils.data import DataLoader, Subset  # 数据加载器和子集
+import random  # 随机数生成
+from yolo_transformer import YOLOTransformerLowLight  # 主模型
+from dataset import LowLightPairDataset  # 数据集
+from high_res_cache import HighResFeatureCache  # 特征缓存
+from config import Config  # 配置参数
 
+# 自定义 collate_fn 函数
+# 作用：处理 batch 中的数据，特别是不同长度的标签列表
 def collate_fn(batch):
     """
     自定义 batch 整理函数
-    用于处理 batch 中的数据，特别是不同长度的标签列表
     
     Args:
         batch: 样本列表 [(high_res, low_light, labels), ...]
-               high_res: 高清图张量
-               low_light: 低光图张量
-               labels: 标注列表 (长度可能不同)
     
     Returns:
         (high_res_batch, low_light_batch, labels_list)
-        - high_res_batch: 堆叠后的高清图 (B, 3, H, W)
-        - low_light_batch: 堆叠后的低光图 (B, 3, H, W)
-        - labels_list: 标签列表 (保持原样)
     """
     # 堆叠高清图像
     # torch.stack: 在新维度上堆叠张量
-    # 将多个 (3, H, W) 张量堆叠为 (B, 3, H, W)
     high_res = torch.stack([item[0] for item in batch])
     
     # 堆叠低光图像
-    # 同样将多个低光图张量堆叠
     low_light = torch.stack([item[1] for item in batch])
     
-    # 标签列表保持不变
-    # 原因：每个样本的标签数量不同，无法堆叠
-    # 保持为列表形式，后续单独处理
+    # 标签列表保持不变 (因为每个样本的标签数量不同)
     labels_list = [item[2] for item in batch]
     
     return high_res, low_light, labels_list
 
 # 配置日志系统
-# 用于记录训练过程、损失变化和错误信息
 logging.basicConfig(
-    level=logging.INFO,  # 日志级别：INFO，记录所有重要信息
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',  # 日志格式：时间 - 名称 - 级别 - 消息
+    level=logging.INFO,  # 日志级别
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',  # 日志格式
     handlers=[
-        # 文件处理器：将日志写入文件
+        # 文件处理器
         logging.FileHandler(os.path.join(Config.LOG_DIR, 'test_train.log')),
-        # 控制台处理器：将日志输出到终端
+        # 控制台处理器
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger(__name__)  # 获取 logger 实例
+logger = logging.getLogger(__name__)
 
 class TestTrainer:
     """
@@ -71,7 +64,6 @@ class TestTrainer:
     - 使用小数据集 (sample_size=1000)
     - 少轮次训练 (epochs=5)
     - 快速验证训练流程
-    - 完整的训练、验证、保存流程
     """
     
     def __init__(self, high_res_dir, low_light_dir, sample_size=1000, model_path='yolo26n.pt'):
@@ -79,49 +71,40 @@ class TestTrainer:
         初始化测试训练器
         
         Args:
-            high_res_dir: 高清图像目录路径
-            low_light_dir: 低光图像目录路径
-            sample_size: 采样图像数量，默认 1000
-            model_path: 预训练 YOLO 模型路径，默认'yolo26n.pt'
+            high_res_dir: 高清图像目录
+            low_light_dir: 低光图像目录
+            sample_size: 采样图像数量
+            model_path: 预训练模型路径
         """
         # 初始化数据集
-        # 加载高清图和低光图的配对数据
         self.dataset = LowLightPairDataset(high_res_dir, low_light_dir)
         
         # 随机采样
-        # 如果数据集大于采样数量，进行随机采样
         if sample_size < len(self.dataset):
             # random.sample: 不重复随机采样
-            # range(len(self.dataset)): 生成索引范围
-            # indices: 随机选择的样本索引列表
             indices = random.sample(range(len(self.dataset)), sample_size)
             
             # Subset: 创建子集
-            # 只包含选中的索引对应的样本
             self.dataset = Subset(self.dataset, indices)
             logger.info(f"随机采样 {sample_size} 个图像进行训练")
         else:
-            # 数据集较小，使用全部数据
             logger.info(f"使用全部 {len(self.dataset)} 个图像进行训练")
         
         # 初始化数据加载器
-        # 用于批量加载数据
         self.dataloader = DataLoader(
             self.dataset,
-            batch_size=Config.BATCH_SIZE,  # 批次大小，从配置读取
-            shuffle=True,  # 打乱数据，每个 epoch 重新排序
-            num_workers=4,  # 数据加载线程数，4 个线程并行加载
-            collate_fn=collate_fn  # 自定义 collate_fn，处理标签列表
+            batch_size=Config.BATCH_SIZE,  # 批次大小
+            shuffle=True,  # 打乱数据
+            num_workers=4,  # 数据加载线程数
+            collate_fn=collate_fn  # 自定义 collate_fn
         )
         
         # 初始化模型
-        # 加载 YOLO26n 并添加低光增强和融合模块
         self.model = YOLOTransformerLowLight(model_path)
         
         # 设备选择
-        # 优先使用 GPU，其次 Apple MPS，最后 CPU
         if torch.backends.mps.is_available():
-            self.device = torch.device('mps')  # Apple Silicon (M1/M2)
+            self.device = torch.device('mps')  # Apple Silicon
         elif torch.cuda.is_available():
             self.device = torch.device('cuda')  # NVIDIA GPU
         else:
@@ -131,44 +114,37 @@ class TestTrainer:
         self.model.to(self.device)
         
         # 初始化缓存
-        # 用于存储和加载高清特征
         self.cache = HighResFeatureCache()
         
         # 配置优化器 - 只优化特定模块
-        # 原因：Backbone 已冻结，只需要优化新增的模块
         params = []
         for name, param in self.model.named_parameters():
             # 只训练增强、融合和检测头
-            # 这些模块需要学习新任务
             if 'light_enhance' in name or 'fusion' in name or 'head' in name:
-                param.requires_grad = True  # 可训练，需要计算梯度
-                params.append(param)  # 添加到优化器参数列表
+                param.requires_grad = True  # 可训练
+                params.append(param)
             else:
-                param.requires_grad = False  # 冻结，不计算梯度
+                param.requires_grad = False  # 冻结
         
         # Adam 优化器
-        # 自适应学习率优化算法
         self.optimizer = optim.Adam(params, lr=Config.LEARNING_RATE)
         
         # 训练轮次 (快速版)
-        # 测试训练只训练 5 个 epoch
         self.epochs = 5
         
         # 余弦退火学习率调度器
-        # 学习率按余弦函数变化，从初始值逐渐降低到最小值
         self.scheduler = CosineAnnealingLR(
             self.optimizer,
-            T_max=self.epochs,  # 最大迭代次数
+            T_max=self.epochs,
             eta_min=1e-6  # 最小学习率
         )
         
         # 训练参数
-        self.best_loss = float('inf')  # 最佳损失，初始为无穷大
+        self.best_loss = float('inf')  # 最佳损失
         
         # 创建保存目录
-        # 使用时间戳命名，避免覆盖
         self.save_dir = os.path.join(Config.WEIGHTS_DIR, f'test_train_{int(time.time())}')
-        os.makedirs(self.save_dir, exist_ok=True)  # 目录已存在时不报错
+        os.makedirs(self.save_dir, exist_ok=True)
         
         # 日志信息
         logger.info(f"测试训练器初始化完成，使用设备：{self.device}")
@@ -183,74 +159,62 @@ class TestTrainer:
         训练一个 epoch
         
         Args:
-            epoch: 当前轮次 (从 1 开始)
+            epoch: 当前轮次
         
         Returns:
             平均损失
         """
         # 设置训练模式
-        # 启用 dropout 和 batchnorm 的训练行为
         for param in self.model.parameters():
             param.requires_grad = True
         
-        total_loss = 0  # 总损失，累计所有 batch 的损失
-        batch_count = 0  # batch 计数，用于计算平均
-        batch_start_time = time.time()  # batch 计时，用于性能分析
+        total_loss = 0  # 总损失
+        batch_count = 0  # batch 计数
+        batch_start_time = time.time()  # batch 计时
         
         # 遍历数据加载器
-        # 每个 batch 包含 (high_res, low_light, labels_list)
         for batch_idx, (high_res, low_light, labels_list) in enumerate(self.dataloader):
             try:
                 # 打印进度
                 print(f"处理图像：Batch {batch_idx}, 图像数量：{len(high_res)}")
                 
                 # 移动到设备
-                # 将数据从 CPU 转移到 GPU/MPS
                 high_res = high_res.to(self.device)
                 low_light = low_light.to(self.device)
                 
                 # 处理标签
-                # 将标签转换为模型需要的格式
                 targets = []
                 for i, labels in enumerate(labels_list):
                     if labels:
                         # 提取类别
-                        # cls: 类别 ID 列表
                         cls = torch.tensor([label[0] for label in labels], device=self.device)
                         
                         # 提取边界框
-                        # bboxes: [x, y, w, h] 归一化坐标
                         bboxes = torch.tensor([label[1:] for label in labels], device=self.device)
                         
                         if len(bboxes) > 0:
-                            # 构建标签字典
                             targets.append({
-                                'img_idx': i,  # 图像索引
-                                'cls': cls,  # 类别
-                                'bboxes': bboxes  # 边界框
+                                'img_idx': i,
+                                'cls': cls,
+                                'bboxes': bboxes
                             })
                 
                 # 提取高清特征
-                # 用于特征融合
                 high_res_feat = []
                 for i in range(high_res.shape[0]):
                     with torch.no_grad():
                         # 1. 增强
-                        # 对高清图进行低光增强
                         enhanced_high_res = self.model.light_enhance(high_res[i:i+1])
                         
                         # 2. Backbone 提取特征
-                        # 提取增强后图像的特征
                         high_res_backbone_feat = self.model.backbone(enhanced_high_res)
                         
                         # 3. 全局池化
-                        # 将空间特征压缩为全局特征
                         high_res_feat_global = torch.nn.functional.adaptive_avg_pool2d(
                             high_res_backbone_feat, (1, 1)
                         ).squeeze()
                         
                         # 4. 维度调整
-                        # 如果特征维度不匹配，使用线性层调整
                         if high_res_feat_global.shape[-1] != Config.FEATURE_DIM:
                             feat_adjust = torch.nn.Linear(
                                 high_res_feat_global.shape[-1], 
@@ -261,28 +225,24 @@ class TestTrainer:
                     high_res_feat.append(high_res_feat_global)
                 
                 # 堆叠特征
-                # 将列表转换为张量 (B, FEATURE_DIM)
                 high_res_feat = torch.stack(high_res_feat)
                 
                 # 前向传播
-                # 输入低光图和高清特征，输出检测结果
                 outputs = self.model(low_light, high_res_feat, is_training=True)
                 
                 # 获取低光特征
-                # 用于计算对齐损失
                 with torch.no_grad():
                     enhanced = self.model.light_enhance(low_light)
                     low_light_feat = self.model.backbone(enhanced)
                 
                 # 计算损失
-                # 包括检测损失和对齐损失
                 loss_dict = self.model.loss_fn(outputs, targets, low_light_feat, high_res_feat)
                 loss = loss_dict['total_loss']
                 
                 # 反向传播
-                self.optimizer.zero_grad()  # 清零梯度，累积梯度会影响训练
-                loss.backward()  # 计算梯度，从 loss 反向传播到所有参数
-                self.optimizer.step()  # 更新参数，使用 Adam 优化器
+                self.optimizer.zero_grad()  # 清零梯度
+                loss.backward()  # 计算梯度
+                self.optimizer.step()  # 更新参数
                 
                 # 累计损失
                 total_loss += loss.item()
@@ -290,7 +250,6 @@ class TestTrainer:
                 
                 # 打印日志
                 if batch_idx % 10 == 0:
-                    # 每 10 个 batch 打印一次
                     batch_time = time.time() - batch_start_time
                     batch_start_time = time.time()
                     logger.info(
@@ -299,7 +258,6 @@ class TestTrainer:
                         f"Loss: {loss.item():.4f}, Time: {batch_time:.2f}s"
                     )
             except Exception as e:
-                # 错误处理
                 import traceback
                 print(f"处理图像失败：Batch {batch_idx}")
                 logger.error(f"训练过程中出错：{e}")
@@ -311,7 +269,6 @@ class TestTrainer:
     def validate(self):
         """
         验证模型
-        在训练集上评估模型性能
         
         Returns:
             验证损失
@@ -320,7 +277,6 @@ class TestTrainer:
         batch_count = 0
         
         # 禁用梯度
-        # 验证阶段不需要反向传播
         with torch.no_grad():
             for batch_idx, (high_res, low_light, labels_list) in enumerate(self.dataloader):
                 try:
@@ -381,7 +337,6 @@ class TestTrainer:
     def train(self):
         """
         训练模型
-        完整的训练循环，包括训练、验证、保存
         """
         logger.info(f"开始测试训练，共 {self.epochs} 个 epoch")
         start_time = time.time()
@@ -411,7 +366,6 @@ class TestTrainer:
             
             # 保存模型
             if val_loss < self.best_loss:
-                # 验证损失降低，保存最佳模型
                 self.best_loss = val_loss
                 best_model_path = os.path.join(self.save_dir, 'best.pt')
                 torch.save(self.model.state_dict(), best_model_path)
@@ -430,11 +384,9 @@ class TestTrainer:
     def export_onnx(self):
         """
         导出模型为 ONNX 格式
-        用于部署到其他平台
         """
         try:
             # 创建示例输入
-            # dummy_input: 模拟输入张量
             dummy_input = torch.randn(1, 3, Config.INPUT_SIZE, Config.INPUT_SIZE).to(self.device)
             high_res_feat = torch.randn(1, Config.FEATURE_DIM).to(self.device)
             
@@ -468,10 +420,7 @@ def test_train_model(high_res_dir, low_light_dir, sample_size=1000):
         sample_size: 采样数量
     """
     try:
-        # 创建训练器
         trainer = TestTrainer(high_res_dir, low_light_dir, sample_size)
-        
-        # 开始训练
         trainer.train()
     except Exception as e:
         logger.error(f"测试训练失败：{e}")
@@ -482,3 +431,4 @@ if __name__ == "__main__":
     high_res_dir = 'sample_data/high_res'
     low_light_dir = 'sample_data/low_light'
     test_train_model(high_res_dir, low_light_dir, sample_size=1000)
+```

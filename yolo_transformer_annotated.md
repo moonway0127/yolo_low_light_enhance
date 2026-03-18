@@ -1,16 +1,19 @@
+# yolo_transformer.py 完整注释
+
+```python
 # 核心检测模型
 # 整合 YOLO26n Backbone + LightEnhance + MobileViTAttention + 自定义检测头
 # 原理：将低光增强、特征融合和目标检测整合到统一的端到端框架中
 
-import torch  # PyTorch 深度学习框架，提供张量计算和神经网络功能
-import torch.nn as nn  # 神经网络模块，提供层 (Layer) 和模型构建功能
-import torch.nn.functional as F  # 函数式接口，提供激活函数、损失函数等
-import numpy as np  # 数值计算库，用于数组操作
-import cv2  # OpenCV 计算机视觉库，用于图像处理
+import torch  # PyTorch 深度学习框架
+import torch.nn as nn  # 神经网络模块
+import torch.nn.functional as F  # 函数式接口
+import numpy as np  # 数值计算库
+import cv2  # OpenCV 计算机视觉库
 from ultralytics import YOLO  # YOLO 目标检测模型
 from light_enhance import LightEnhance  # 低光增强模块
 from fusion_module import MobileViTAttention  # Transformer 融合模块
-from config import Config  # 配置参数类
+from config import Config  # 配置参数
 
 class CustomDetectHead(nn.Module):
     """
@@ -30,47 +33,36 @@ class CustomDetectHead(nn.Module):
         Args:
             num_classes: 类别数量，默认 80(COCO 数据集)
         """
-        # 调用父类 nn.Module 的构造函数，初始化模块
+        # 调用父类构造函数
         super(CustomDetectHead, self).__init__()
         
         # 保存类别数量
         self.num_classes = num_classes
         
-        # 检测层：1x1 卷积层
+        # 检测层：1x1 卷积
         # 输入：16 通道 (融合特征)
         # 输出：(5 + num_classes) * 3 通道
-        #   - 5: 边界框 4 个参数 (x,y,w,h) + 1 个目标置信度
-        #   - num_classes: 类别概率分布
+        #   - 5: 边界框 4 个参数 (x,y,w,h) + 1 个置信度
+        #   - num_classes: 类别概率
         #   - 3: 3 个 anchor(每个网格点预测 3 个边界框)
-        # kernel_size=1: 1x1 卷积，只调整通道数，不改变空间尺寸
         self.detect = nn.Conv2d(16, (5 + num_classes) * 3, kernel_size=1)
     
     def forward(self, x):
         """
-        前向传播 - 检测头的核心计算流程
+        前向传播
         
         Args:
             x: 融合特征 (B, 16, H, W)
-               B: batch size (批次大小)
-               16: 特征通道数
-               H: 特征图高度
-               W: 特征图宽度
         
         Returns:
             检测结果 (B, num_anchors, grid_h, grid_w, 5+num_classes)
-            每个网格点输出 5+num_classes 个值：
-            - 前 4 个：边界框参数 (tx, ty, tw, th)
-            - 第 5 个：目标置信度 logits
-            - 后 num_classes 个：类别概率 logits
         """
-        # 确保特征在内存中是连续的
+        # 确保特征内存连续
         # 原因：某些操作 (如 view) 需要连续的内存布局
-        # contiguous() 会重新排列数据使其在内存中连续
         x = x.contiguous()
         
-        # 通过检测层进行卷积运算
+        # 通过检测层
         # 输出形状：(B, (5+num_classes)*3, H, W)
-        # 每个通道对应不同的预测值
         out = self.detect(x)
         
         # 获取批次大小
@@ -81,16 +73,14 @@ class CustomDetectHead(nn.Module):
         
         # 调整输出格式
         # 目标格式：(B, num_anchors, 5+num_classes, grid_h, grid_w)
-        # view: 重新调整张量形状
+        # view: 重新调整形状
         #   out.shape[-1] 是 W 维度
-        #   -1 表示自动计算该维度的大小
-        # 结果：(B, 3, 5+num_classes, H, W)
+        #   -1 自动计算 H 维度
         out = out.view(batch_size, 3, 5 + num_classes, -1, out.shape[-1])
         
         # permute: 调整维度顺序
-        # 从 (B, 3, 5+num_classes, H, W) 变换到 (B, 3, H, W, 5+num_classes)
-        # 原因：方便后续处理，将通道维度 (预测值) 移到最后
-        # .contiguous() 确保变换后的张量在内存中连续
+        #   从 (B, 3, 5+num_classes, H, W) 到 (B, 3, H, W, 5+num_classes)
+        # 原因：方便后续处理，将通道维度移到最后
         out = out.permute(0, 1, 3, 4, 2).contiguous()
         
         return out
@@ -103,18 +93,12 @@ class CustomDetectHead(nn.Module):
             outputs: 检测头输出 (B, num_anchors, grid_h, grid_w, 5+num_classes)
             img_shape: 原始图像形状 (H, W)
             conf_thres: 置信度阈值，默认 0.35
-                       低于此阈值的检测框会被过滤
             iou_thres: NMS IoU 阈值，默认 0.6
-                      IoU 超过此阈值的重叠框会被抑制
             max_det: 最大检测数量，默认 50
-                    每张图像最多保留 50 个检测框
         
         Returns:
             标准格式的检测结果 (list of tensors)
             每个 tensor 形状：(N, 6) - (x1,y1,x2,y2,conf,cls)
-            - x1,y1,x2,y2: 边界框坐标
-            - conf: 置信度分数
-            - cls: 预测类别 ID
         """
         import torch
         from torchvision.ops import batched_nms
@@ -122,18 +106,17 @@ class CustomDetectHead(nn.Module):
         # 获取批次大小
         batch_size = outputs.shape[0]
         
-        # 获取设备 (CPU/GPU)
+        # 获取设备
         device = outputs.device
         
-        # 结果列表，存储每个样本的检测结果
+        # 结果列表
         results = []
         
         # YOLO 的 anchor 尺寸 (9 个 anchor，分为 3 组)
-        # 来源：COCO 数据集的统计结果
+        # 来源：COCO 数据集统计
         # 第 1 组 (小目标): [10,13], [16,30], [33,23]
         # 第 2 组 (中目标): [30,61], [62,45], [59,119]
         # 第 3 组 (大目标): [116,90], [156,198], [373,326]
-        # 这些 anchor 是先验框，用于预测不同尺寸的目标
         anchors = torch.tensor([
             [10, 13], [16, 30], [33, 23],
             [30, 61], [62, 45], [59, 119],
@@ -146,26 +129,22 @@ class CustomDetectHead(nn.Module):
             pred = outputs[i]
             
             # 获取维度信息
-            # num_anchors: anchor 数量 (3)
-            # grid_h: 特征图高度
-            # grid_w: 特征图宽度
             num_anchors, grid_h, grid_w, _ = pred.shape
             
             # 展平空间维度
             # 从 (num_anchors, grid_h, grid_w, 5+num_classes) 
-            # 变换到 (num_anchors*grid_h*grid_w, 5+num_classes)
-            # 原因：方便后续处理，将所有网格点的预测展平
+            # 到 (num_anchors*grid_h*grid_w, 5+num_classes)
             pred = pred.reshape(-1, 5 + self.num_classes)
             
             # 分离预测值
-            # pred_boxes: 边界框参数 (tx,ty,tw,th) - 前 4 列
+            # pred_boxes: 边界框参数 (x,y,w,h) - 前 4 列
             pred_boxes = pred[:, :4]
             
-            # obj_conf: 目标置信度 logits - 第 5 列
-            # sigmoid 激活：将 logits 转换为概率 (0-1 范围)
+            # obj_conf: 目标置信度 - 第 5 列
+            # sigmoid 激活：将 logits 转换为概率 (0-1)
             obj_conf = torch.sigmoid(pred[:, 4])
             
-            # class_scores: 类别分数 logits - 第 6 列及以后
+            # class_scores: 类别分数 - 第 6 列及以后
             # sigmoid 激活：将 logits 转换为概率
             class_scores = torch.sigmoid(pred[:, 5:])
             
@@ -176,12 +155,11 @@ class CustomDetectHead(nn.Module):
             # grid_x: [0, 1, 2, ..., grid_w-1]
             grid_x = torch.arange(grid_w, device=device)
             
-            # meshgrid: 创建网格坐标矩阵
-            # indexing='ij': 使用矩阵索引方式 (先行后列)
+            # meshgrid: 创建网格
+            # indexing='ij': 矩阵索引方式
             grid_y, grid_x = torch.meshgrid(grid_y, grid_x, indexing='ij')
             
             # stack: 堆叠为 (grid_h, grid_w, 2)
-            # dim=-1: 在最后一个维度堆叠
             grid = torch.stack((grid_x, grid_y), dim=-1)
             
             # reshape: 展平为 (grid_h*grid_w, 2)
@@ -189,40 +167,31 @@ class CustomDetectHead(nn.Module):
             
             # repeat: 重复 num_anchors 次
             # 因为每个网格点有 num_anchors 个预测
-            # 结果：(num_anchors*grid_h*grid_w, 2)
             grid = grid.repeat(num_anchors, 1)
             
             # 选择对应的 anchor
             # anchor_idx: [0,0,0, 1,1,1, ..., num_anchors-1,num_anchors-1,num_anchors-1]
-            # view(-1, 1, 1): 调整形状为 (num_anchors, 1, 1)
             anchor_idx = torch.arange(num_anchors, device=device).view(-1, 1, 1)
-            
-            # repeat: 重复到与网格相同的尺寸
-            # 结果：(num_anchors*grid_h*grid_w,)
             anchor_idx = anchor_idx.repeat(1, grid_h, grid_w).reshape(-1)
             
             # 选择 anchor (循环使用 9 个 anchor)
-            # % len(anchors): 确保索引在有效范围内
             selected_anchors = anchors[anchor_idx % len(anchors)]
             
             # 解码边界框
             # stride: 网格步长 = 图像宽度 / 网格宽度
-            # 用于将网格坐标转换为像素坐标
             stride = img_shape[1] / grid_w
             
             # cx, cy: 中心坐标
-            # sigmoid(tx) + grid_offset: 限制中心点在网格内
+            # sigmoid(tx) + grid_offset
             cx = (torch.sigmoid(pred_boxes[:, 0]) + grid[:, 0]) * stride
             cy = (torch.sigmoid(pred_boxes[:, 1]) + grid[:, 1]) * stride
             
             # w, h: 宽高
-            # exp(tw,th) * anchor_w,anchor_h: 基于 anchor 预测宽高
+            # exp(tw,th) * anchor_w,anchor_h
             w = torch.exp(pred_boxes[:, 2]) * selected_anchors[:, 0]
             h = torch.exp(pred_boxes[:, 3]) * selected_anchors[:, 1]
             
             # 转换为 [x1, y1, x2, y2] 格式
-            # x1,y1: 左上角坐标
-            # x2,y2: 右下角坐标
             x1 = cx - w / 2
             y1 = cy - h / 2
             x2 = cx + w / 2
@@ -239,7 +208,6 @@ class CustomDetectHead(nn.Module):
             
             # 应用置信度阈值
             # 只保留置信度 > conf_thres 的检测框
-            # mask: 布尔掩码，True 表示保留
             mask = conf > conf_thres
             boxes = boxes[mask]
             conf = conf[mask]
@@ -247,16 +215,12 @@ class CustomDetectHead(nn.Module):
             
             # 处理没有检测框的情况
             if len(boxes) == 0:
-                # 添加空结果
                 results.append(torch.zeros((0, 6), device=device))
                 continue
             
             # 按置信度排序，取前 max_det 个
-            # argsort: 返回排序后的索引
-            # descending=True: 降序排列
             conf_sort_idx = torch.argsort(conf, descending=True)
             if len(conf_sort_idx) > max_det:
-                # 只保留前 max_det 个
                 conf_sort_idx = conf_sort_idx[:max_det]
             boxes = boxes[conf_sort_idx]
             conf = conf[conf_sort_idx]
@@ -264,8 +228,6 @@ class CustomDetectHead(nn.Module):
             
             # 应用 NMS (非极大值抑制)
             # 去除重叠的边界框，保留置信度最高的
-            # nms: 输入边界框、置信度和 IoU 阈值
-            # 返回保留的索引
             from torchvision.ops import nms
             keep = nms(boxes, conf, iou_thres)
             
@@ -276,11 +238,10 @@ class CustomDetectHead(nn.Module):
             
             # 组合结果
             # 格式：(x1, y1, x2, y2, conf, cls)
-            # cat: 在指定维度拼接张量
             result = torch.cat((
                 boxes, 
-                conf.unsqueeze(1),  # 增加维度 (N, 1)
-                class_pred.unsqueeze(1).float()  # 增加维度并转换为 float
+                conf.unsqueeze(1), 
+                class_pred.unsqueeze(1).float()
             ), dim=1)
             results.append(result)
         
@@ -304,45 +265,36 @@ class YOLOTransformerLowLight(nn.Module):
         Args:
             model_path: 预训练 YOLO 模型路径
         """
-        # 调用父类构造函数
         super(YOLOTransformerLowLight, self).__init__()
         
         # 加载 YOLO26n 模型
-        # YOLO 模型包含完整的检测流程：Backbone + Neck + Head
         self.yolo = YOLO(model_path)
         
         # 获取 YOLO 模型的 Backbone
         # YOLO 模型结构：model[0]=Backbone, model[1]=Neck, model[2]=Head
-        # Backbone 负责特征提取
         self.backbone = self.yolo.model.model[0]
         
         # 冻结 Backbone 参数
         # 原因：Backbone 已经预训练好，不需要更新
-        # 可以减少训练时间和内存占用
         for param in self.backbone.parameters():
             param.requires_grad = False
         
         # 初始化低光增强模块
-        # 用于增强低光图像的亮度和对比度
         self.light_enhance = LightEnhance()
         
         # 初始化 Transformer 融合模块
-        # 用于融合低光特征和高清缓存特征
         self.fusion = MobileViTAttention()
         
         # 特征压缩层 (1x1 卷积)
         # 作用：将低光特征压缩到配置维度 (128)
-        # 便于与高清特征进行对齐
         self.feature_compress = nn.Conv2d(16, Config.FEATURE_DIM, kernel_size=1)
         
         # 自定义检测头
-        # 用于处理融合特征并输出检测结果
         self.custom_head = CustomDetectHead(num_classes=80)
         
         # 损失权重
-        # 用于平衡不同损失项的重要性
-        self.dark_loss_weight = Config.DARK_LOSS_WEIGHT  # 1.8 - 暗部损失权重
-        self.alignment_loss_weight = Config.ALIGNMENT_LOSS_WEIGHT  # 0.5 - 对齐损失权重
+        self.dark_loss_weight = Config.DARK_LOSS_WEIGHT  # 1.8
+        self.alignment_loss_weight = Config.ALIGNMENT_LOSS_WEIGHT  # 0.5
     
     def get_dark_mask(self, image):
         """
@@ -350,40 +302,30 @@ class YOLOTransformerLowLight(nn.Module):
         
         Args:
             image: 输入图像 (B, 3, H, W)
-                   B: batch size
-                   3: RGB 通道
-                   H: 图像高度
-                   W: 图像宽度
         
         Returns:
             暗部掩码 (B, 1, H, W)
             1 表示暗部 (灰度<50), 0 表示亮部
         """
         # RGB 转灰度 - 向量化操作 (快速)
-        # 使用标准灰度系数:
-        # - R: 0.299 (红色贡献最小)
-        # - G: 0.587 (绿色贡献最大，人眼对绿色敏感)
-        # - B: 0.114 (蓝色贡献次小)
-        # 原理：人眼对不同颜色敏感度不同
+        # 使用标准灰度系数
         gray = image[:, 0] * 0.299 + image[:, 1] * 0.587 + image[:, 2] * 0.114
         
         # 生成二值掩码
-        # gray < DARK_THRESHOLD: 比较运算，返回 bool 张量
-        # Config.DARK_THRESHOLD = 50: 暗部阈值
-        # 灰度值 < 50 的区域被认为是暗部
-        # .float(): 将 bool 转换为 float (True->1.0, False->0.0)
-        # .unsqueeze(1): 增加通道维度，变为 (B, 1, H, W)
+        # gray < DARK_THRESHOLD: bool 张量
+        # .float(): 转换为 float
+        # .unsqueeze(1): 增加通道维度
         mask = (gray < Config.DARK_THRESHOLD).float().unsqueeze(1)
         
         return mask
     
     def forward(self, low_light_frame, high_res_feat=None, is_training=False):
         """
-        前向传播 - 模型的核心计算流程
+        前向传播
         
         Args:
             low_light_frame: 低光帧 (B, 3, H, W)
-            high_res_feat: 高清缓存特征 (B, 128)或 None
+            high_res_feat: 高清缓存特征 (B, 128) 或 None
             is_training: 是否为训练模式
         
         Returns:
@@ -393,26 +335,21 @@ class YOLOTransformerLowLight(nn.Module):
         
         try:
             # 1. 低光增强
-            # 使用 Zero-DCE 网络增强低光图像
             enhance_start = time.time()
             enhanced_frame = self.light_enhance(low_light_frame)
             enhance_time = time.time() - enhance_start
             
             # 2. Backbone 提取特征
-            # 使用 YOLO 的 Backbone 提取增强后图像的特征
             backbone_start = time.time()
             low_light_feat = self.backbone(enhanced_frame)
             backbone_time = time.time() - backbone_start
             
             # 3. 生成暗部掩码
-            # 识别图像中的暗部区域
             mask_start = time.time()
             dark_mask = self.get_dark_mask(low_light_frame)
             mask_time = time.time() - mask_start
             
             # 调整暗部掩码尺寸以匹配特征图
-            # 原因：掩码原始尺寸是图像尺寸，需要与特征图尺寸一致
-            # F.interpolate: 双线性插值调整尺寸
             dark_mask = F.interpolate(
                 dark_mask, 
                 size=(low_light_feat.shape[2], low_light_feat.shape[3]), 
@@ -421,20 +358,16 @@ class YOLOTransformerLowLight(nn.Module):
             )
             
             # 4. 特征融合
-            # 融合低光特征和高清缓存特征
             fusion_start = time.time()
             if high_res_feat is not None:
                 # 有高清特征，进行融合
-                # 使用 MobileViT 注意力机制
                 fused_feat = self.fusion(low_light_feat, high_res_feat, dark_mask)
             else:
                 # 无高清特征，使用原始特征
-                # 降级为普通 YOLO 检测
                 fused_feat = low_light_feat
             fusion_time = time.time() - fusion_start
             
             # 5. 检测头输出
-            # 生成最终的检测结果
             head_start = time.time()
             outputs = self.custom_head(fused_feat)
             head_time = time.time() - head_start
@@ -442,7 +375,6 @@ class YOLOTransformerLowLight(nn.Module):
             # 时间统计
             total_time = enhance_time + backbone_time + mask_time + fusion_time + head_time
             
-            # 打印各阶段耗时
             print(f"  Forward 时间分解:")
             print(f"    - 低光增强：{enhance_time*1000:.1f}ms ({enhance_time/total_time*100:.1f}%)")
             print(f"    - Backbone 特征提取：{backbone_time*1000:.1f}ms ({backbone_time/total_time*100:.1f}%)")
@@ -458,7 +390,6 @@ class YOLOTransformerLowLight(nn.Module):
             traceback.print_exc()
             
             # 回退到不使用融合
-            # 确保模型仍然能输出结果
             enhanced_frame = self.light_enhance(low_light_frame)
             low_light_feat = self.backbone(enhanced_frame)
             outputs = self.custom_head(low_light_feat)
@@ -470,7 +401,7 @@ class YOLOTransformerLowLight(nn.Module):
         
         Args:
             outputs: 模型输出 [batch, num_anchors, grid_h, grid_w, 5+num_classes]
-            targets: 真实标签 (list of list of dicts)
+            targets: 真实标签 (list of dicts)
             low_light_feat: 低光特征
             high_res_feat: 高清特征
         
@@ -485,10 +416,9 @@ class YOLOTransformerLowLight(nn.Module):
         alignment_loss = torch.tensor(0.0, device=outputs.device)
         
         # YOLO 损失权重
-        # 用于平衡不同损失项的重要性
-        box_gain = 0.05  # 定位损失权重 (边界框位置)
-        cls_gain = 0.5   # 分类损失权重 (类别预测)
-        obj_gain = 1.0   # 置信度损失权重 (目标存在性)
+        box_gain = 0.05  # 定位损失权重
+        cls_gain = 0.5   # 分类损失权重
+        obj_gain = 1.0   # 置信度损失权重
         
         # 处理每个 batch
         if targets and len(targets) > 0:
@@ -496,179 +426,142 @@ class YOLOTransformerLowLight(nn.Module):
             num_classes = self.custom_head.num_classes
             
             for batch_idx in range(batch_size):
-                # 获取当前 batch 的预测
+                # 获取预测
                 pred = outputs[batch_idx]
                 
-                # 展平空间维度
-                # 从 (num_anchors, grid_h, grid_w, 5+num_classes)
-                # 到 (num_anchors*grid_h*grid_w, 5+num_classes)
+                # 展平
                 pred_flat = pred.view(-1, 5 + num_classes)
                 
                 # 分离预测值
-                # pred_boxes: 边界框参数 (x,y,w,h) - 前 4 列
-                pred_boxes = pred_flat[:, :4]
+                pred_boxes = pred_flat[:, :4]  # [x, y, w, h]
+                pred_obj = pred_flat[:, 4]     # 置信度
+                pred_cls = pred_flat[:, 5:]    # 类别
                 
-                # pred_obj: 目标置信度 - 第 5 列
-                pred_obj = pred_flat[:, 4]
-                
-                # pred_cls: 类别分数 - 第 6 列及以后
-                pred_cls = pred_flat[:, 5:]
-                
-                # 获取当前 batch 的真实标签
+                # 获取标签
                 try:
                     target_list = targets[batch_idx]
-                except (IndexError, TypeError, KeyError):
+                except:
                     continue
                 
-                # 跳过空标签
-                if target_list is None or (isinstance(target_list, (list, tuple)) and len(target_list) == 0):
+                if not target_list:
                     continue
                 
                 # 解析标签
-                # targets 的格式是：[{'img_idx': i, 'cls': cls, 'bboxes': bboxes}, ...]
-                if isinstance(target_list, list) and len(target_list) > 0 and isinstance(target_list[0], dict):
-                    # 从 dict 中提取 cls 和 bboxes
-                    try:
-                        target_cls_list = []
-                        target_cxywh_list = []
-                        for t in target_list:
-                            if 'cls' in t and 'bboxes' in t:
-                                cls = t['cls']
-                                bboxes = t['bboxes']
-                                # bboxes 格式是 [x, y, w, h](已经是归一化的)
-                                if len(bboxes) == 4:
-                                    target_cls_list.append(cls)
-                                    target_cxywh_list.append(bboxes)
-                        
-                        if len(target_cls_list) == 0:
-                            continue
-                        
-                        target_cls = torch.tensor(target_cls_list).long()
-                        target_cxywh = torch.tensor(target_cxywh_list)
-                    except Exception as e:
-                        print(f"处理 dict 格式标签失败：{e}")
+                if isinstance(target_list, list) and len(target_list) > 0:
+                    target_cls_list = []
+                    target_cxywh_list = []
+                    
+                    for t in target_list:
+                        if 'cls' in t and 'bboxes' in t:
+                            cls = t['cls']
+                            bboxes = t['bboxes']
+                            if len(bboxes) == 4:
+                                target_cls_list.append(cls)
+                                target_cxywh_list.append(bboxes)
+                    
+                    if len(target_cls_list) == 0:
                         continue
+                    
+                    target_cls = torch.tensor(target_cls_list).long()
+                    target_cxywh = torch.tensor(target_cxywh_list)
                 else:
-                    # 跳过其他格式的标签
                     continue
                 
-                # 将真实标签转换为相对于网格的坐标
-                # grid_h, grid_w: 特征图的尺寸
-                grid_h, grid_w = pred.shape[0], pred.shape[1]
-                
                 # 转换为网格坐标
-                # 乘以网格尺寸，得到在特征图上的坐标
+                grid_h, grid_w = pred.shape[0], pred.shape[1]
                 target_cx = target_cxywh[:, 0] * grid_w
                 target_cy = target_cxywh[:, 1] * grid_h
                 target_w = target_cxywh[:, 2] * grid_w
                 target_h = target_cxywh[:, 3] * grid_h
                 
-                # 为每个真实框计算损失
+                # 计算损失
                 for i in range(len(target)):
-                    # 找到距离真实框中心最近的预测框
-                    # 计算预测框中心与真实框中心的距离
+                    # 找到最近的 k 个预测框
                     cx_diff = torch.abs(pred_boxes[:, 0] - target_cx[i])
                     cy_diff = torch.abs(pred_boxes[:, 1] - target_cy[i])
                     dist = cx_diff + cy_diff
                     
-                    # 选择最近的 k 个预测框
-                    # 这些预测框负责预测该真实目标
                     k = min(10, len(pred_boxes))
                     _, topk_idx = torch.topk(dist, k, largest=False)
                     
                     # 1. 定位损失 (MSE)
-                    # 预测框参数与真实框参数的均方误差
                     box_loss += F.mse_loss(pred_boxes[topk_idx, 0], target_cx[i].expand(k)) * box_gain
                     box_loss += F.mse_loss(pred_boxes[topk_idx, 1], target_cy[i].expand(k)) * box_gain
                     box_loss += F.mse_loss(pred_boxes[topk_idx, 2], target_w[i].expand(k)) * box_gain
                     box_loss += F.mse_loss(pred_boxes[topk_idx, 3], target_h[i].expand(k)) * box_gain
                     
-                    # 2. 置信度损失 (BCE) - 正样本
-                    # 预测框应该输出高置信度
+                    # 2. 置信度损失 (BCE)
                     obj_target = torch.ones(k, device=outputs.device)
                     obj_loss += F.binary_cross_entropy_with_logits(pred_obj[topk_idx], obj_target) * obj_gain
                     
                     # 3. 分类损失 (BCE)
-                    # one-hot 编码的类别标签
                     cls_target = torch.zeros_like(pred_cls[topk_idx])
                     cls_target[torch.arange(k), target_cls[i]] = 1.0
                     cls_loss += F.binary_cross_entropy_with_logits(pred_cls[topk_idx], cls_target) * cls_gain
             
             # 平均损失
-            # 除以目标数量，得到平均损失
-            num_targets = sum(len(t) for t in targets if t is not None and len(t) > 0)
+            num_targets = sum(len(t) for t in targets if t)
             if num_targets > 0:
                 box_loss = box_loss / num_targets
                 obj_loss = obj_loss / num_targets
                 cls_loss = cls_loss / num_targets
         
         # 总检测损失
-        # 定位损失 + 置信度损失 + 分类损失
         detection_loss = box_loss + obj_loss + cls_loss
         total_loss += detection_loss
         
-        # 跨特征对齐损失
-        # 约束低光特征与高清特征的一致性
+        # 特征对齐损失
         if high_res_feat is not None:
-            # 压缩低光特征到相同维度
+            # 压缩低光特征
             low_light_feat_compressed = self.feature_compress(low_light_feat)
             
             # 全局池化
-            # 将空间特征压缩为全局特征
-            low_light_feat_global = F.adaptive_avg_pool2d(low_light_feat_compressed, (1, 1)).squeeze()
+            low_light_feat_global = F.adaptive_avg_pool2d(
+                low_light_feat_compressed, (1, 1)
+            ).squeeze()
             
             # MSE 对齐损失
-            # 低光全局特征与高清特征的均方误差
             alignment_loss = F.mse_loss(low_light_feat_global, high_res_feat) * self.alignment_loss_weight
             total_loss += alignment_loss
         
-        # 返回损失字典
         return {
             'total_loss': total_loss,
-            'box_loss': box_loss.item() if isinstance(box_loss, torch.Tensor) else box_loss,
-            'obj_loss': obj_loss.item() if isinstance(obj_loss, torch.Tensor) else obj_loss,
-            'cls_loss': cls_loss.item() if isinstance(cls_loss, torch.Tensor) else cls_loss,
-            'alignment_loss': alignment_loss.item() if isinstance(alignment_loss, torch.Tensor) else alignment_loss
+            'box_loss': box_loss.item(),
+            'obj_loss': obj_loss.item(),
+            'cls_loss': cls_loss.item(),
+            'alignment_loss': alignment_loss.item()
         }
     
     def detect(self, image, high_res_feat=None):
         """
-        推理方法 - 完整的检测流程
+        推理方法
         
         Args:
-            image: 输入图像 (弱光环境的照片，存在物体或人)
-                   可以是 numpy 数组或张量
-            high_res_feat: 高清缓存特征 (当前场景的高清环境照片特征)
+            image: 输入图像 (numpy 数组或张量)
+            high_res_feat: 高清缓存特征
         
         Returns:
             检测结果 (ultralytics Results 格式)
         """
         import time
-        # 记录总开始时间
         total_start = time.time()
         
-        # 禁用梯度计算
-        # 推理阶段不需要反向传播，可以节省内存和加速计算
         with torch.no_grad():
             # 1. 预处理
             preproc_start = time.time()
             if isinstance(image, np.ndarray):
-                # numpy 数组转换为张量
-                # .permute(2, 0, 1): (H, W, C) -> (C, H, W)
-                # .unsqueeze(0): 增加 batch 维度 (1, C, H, W)
+                # numpy → tensor
                 image_tensor = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0).float()
-                # 移动到模型所在设备
                 image_tensor = image_tensor.to(next(self.parameters()).device)
             else:
-                # 已经是张量，直接使用
                 image_tensor = image
             
-            # 确保高清特征在正确的设备上
+            # 高清特征设备同步
             if high_res_feat is not None:
                 high_res_feat = high_res_feat.to(next(self.parameters()).device)
             preproc_time = time.time() - preproc_start
             
-            # 2. 前向传播 (包含低光增强、特征提取、特征融合、检测头)
+            # 2. 前向传播
             forward_start = time.time()
             print("使用融合特征进行前向传播")
             outputs = self.forward(image_tensor, high_res_feat, is_training=False)
@@ -677,15 +570,12 @@ class YOLOTransformerLowLight(nn.Module):
             # 3. 后处理
             postproc_start = time.time()
             print("使用自定义后处理方法处理融合特征输出")
-            # 获取图像尺寸
             img_shape = (image_tensor.shape[2], image_tensor.shape[3])
-            # 应用 NMS 等后处理
             results = self.custom_head.postprocess(outputs, img_shape)
             postproc_time = time.time() - postproc_start
             
             # 4. 结果转换
             convert_start = time.time()
-            # 将结果转换为 ultralytics 格式，方便使用官方可视化工具
             from ultralytics.engine.results import Results
             results_obj = Results(
                 path='image0.jpg',
@@ -695,16 +585,14 @@ class YOLOTransformerLowLight(nn.Module):
             )
             convert_time = time.time() - convert_start
             
-            # 计算总耗时
+            # 时间统计
             total_time = time.time() - total_start
-            
-            # 打印时间统计
             print(f"\n增强 YOLO 推理时间分解:")
-            print(f"  1. 预处理 (图像转张量): {preproc_time*1000:.1f}ms ({preproc_time/total_time*100:.1f}%)")
-            print(f"  2. 前向传播 (增强 + 融合 + 检测头): {forward_time*1000:.1f}ms ({forward_time/total_time*100:.1f}%)")
-            print(f"  3. 后处理 (NMS 等): {postproc_time*1000:.1f}ms ({postproc_time/total_time*100:.1f}%)")
-            print(f"  4. 结果转换：{convert_time*1000:.1f}ms ({convert_time/total_time*100:.1f}%)")
+            print(f"  1. 预处理：{preproc_time*1000:.1f}ms")
+            print(f"  2. 前向传播：{forward_time*1000:.1f}ms")
+            print(f"  3. 后处理：{postproc_time*1000:.1f}ms")
+            print(f"  4. 结果转换：{convert_time*1000:.1f}ms")
             print(f"  总耗时：{total_time*1000:.1f}ms")
-            print()
             
             return results_obj
+```
