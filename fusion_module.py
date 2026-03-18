@@ -82,11 +82,13 @@ class MobileViTAttention(nn.Module):
         flow_grid[..., 1] = flow_grid[..., 1] / (H - 1) * 2 - 1
         
         # 双线性采样，对齐高清特征
+        # MPS 不支持 'border' padding_mode，使用 'zeros' 替代
+        padding_mode = 'zeros' if low_light_feat.device.type == 'mps' else 'border'
         aligned_high_res = F.grid_sample(
             high_res_proj, 
             flow_grid, 
             mode='bilinear', 
-            padding_mode='border'
+            padding_mode=padding_mode
         )
         
         # ==================== Step 3: 估计人体区域 ====================

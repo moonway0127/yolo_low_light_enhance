@@ -10,6 +10,7 @@
 | **行人保护** | ❌ 暗部区域可能稀释 | ✅ 人体区域估计 | 保护行人特征不被背景稀释 |
 | **融合策略** | 直接相加 | ✅ 三维权重 + 残差 | 智能选择融合区域 |
 | **检测任务** | 通用目标 | ✅ 专注行人 | 针对行人检测优化 |
+| **检测头** | 255 通道 | ✅ 18 通道 | 参数量减少 14 倍，推理更快 |
 
 ### v2.0 核心改进详解
 
@@ -97,50 +98,53 @@ graph TB
 ```mermaid
 graph TB
     subgraph 输入
-        A[低光特征<br/>B×16×H×W] --> F[融合模块]
-        B[高清特征<br/>B×128] --> C[1×1 卷积]
-        B[高清特征<br/>B×128] --> G[维度扩展]
+        A[低光特征 B-16-H-W]
+        B[高清特征 B-128]
     end
     
-    subgraph Step1: 维度适配
-        C --> D[高清投影<br/>B×16×H×W]
-        G --> E[空间扩展<br/>B×128×H×W]
+    subgraph Step1-维度适配
+        B --> C[1x1 卷积]
+        C --> D[高清投影 B-16-H-W]
     end
     
-    subgraph Step2: 图像配准[v2.0 新增]
-        D --> H[拼接特征]
-        E --> H
-        H --> I[配准网络<br/>3层卷积]
-        I --> J[光流估计<br/>B×2×H×W]
-        J --> K[特征对齐]
+    subgraph Step2-掩码生成
+        A --> E[暗部掩码计算]
+        E --> F[暗部掩码 B-1-H-W]
+        A --> G[人体估计网络]
+        G --> H[人体掩码 B-1-H-W]
     end
     
-    subgraph Step3: 人体区域估计[v2.0 新增]
-        E --> L[人体估计网络]
-        L --> M[人体响应计算]
-        M --> N[人体掩码]
+    subgraph Step3-配准-v2.0
+        A --> I[拼接]
+        D --> I
+        I --> J[配准网络 3 层卷积]
+        J --> K[光流场 B-2-H-W]
+        K --> L[网格采样]
+        L --> M[对齐后高清特征]
     end
     
-    subgraph Step4: 三维权重[v2.0 新增]
-        N --> O[人体权重]
-        E --> P[暗部权重]
-        K --> Q[差异权重]
-        O --> R[综合权重计算]
-        P --> R
-        Q --> R
+    subgraph Step4-权重-v2.0
+        H --> N[人体权重]
+        F --> O[暗部权重]
+        M --> P[差异权重]
+        N --> Q[综合权重计算]
+        O --> Q
+        P --> Q
     end
     
-    subgraph Step5: 残差融合[v2.0 新增]
-        R --> S[残差计算]
-        K --> S
-        S --> T[加权融合]
-        T --> U[输出特征<br/>B×16×H×W]
+    subgraph Step5-融合-v2.0
+        M --> R[残差计算]
+        A --> R
+        R --> S[应用权重]
+        Q --> S
+        S --> T[输出投影]
+        T --> U[最终特征 B-16-H-W]
     end
     
-    style I fill:#ff9800
-    style L fill:#ff9800
+    style J fill:#ff9800
+    style G fill:#ff9800
+    style Q fill:#ff9800
     style R fill:#ff9800
-    style S fill:#ff9800
     style U fill:#4caf50
 ```
 
@@ -149,20 +153,20 @@ graph TB
 ```mermaid
 graph LR
     subgraph 三维权重计算
-        A[人体权重<br/>human_weight] --> D[综合权重]
-        B[暗部权重<br/>dark_weight] --> D
-        C[差异权重<br/>diff_weight] --> D
+        A[人体权重 human_weight] --> D[综合权重]
+        B[暗部权重 dark_weight] --> D
+        C[差异权重 diff_weight] --> D
     end
     
     subgraph 融合公式
-        D --> E[fuse_weight = (1-human) × dark × (1-diff)]
+        D --> E["fuse_weight = (1-human) * dark * (1-diff)"]
     end
     
     subgraph 融合效果
         E --> F{区域判断}
-        F -->|人体区域| G[weight=0<br/>不融合]
-        F -->|暗部背景| H[weight=1<br/>融合增强]
-        F -->|亮部区域| I[weight=0<br/>不融合]
+        F -->|人体区域 | G[weight=0 不融合]
+        F -->|暗部背景 | H[weight=1 融合增强]
+        F -->|亮部区域 | I[weight=0 不融合]
     end
     
     style A fill:#e3f2fd
@@ -257,30 +261,30 @@ sequenceDiagram
 
 ```mermaid
 graph TB
-    subgraph 创新1: 图像配准
-        A1[问题] --> B1[高清背景和低光帧<br/>可能有位置偏移]
-        A1 --> C1[原因：风/触碰/<br/>镜头微小移动]
-        B1 --> D1[轻量级光流网络<br/>3层卷积估计偏移]
-        D1 --> E1[对齐后融合<br/>精度提升]
+    subgraph 创新 1-图像配准
+        A1[问题] --> B1[高清背景和低光帧 可能有位置偏移]
+        A1 --> C1[原因：风 触碰 镜头微小移动]
+        B1 --> D1[轻量级光流网络 3 层卷积估计偏移]
+        D1 --> E1[对齐后融合 精度提升]
     end
     
-    subgraph 创新2: 人体区域估计
-        A2[问题] --> B2[行人通常在暗部<br/>直接融合会稀释特征]
-        A2 --> C2[不能用YOLO检测<br/>（低光下检测不准）]
-        C2 --> D2[利用特征统计特性<br/>纹理复杂度估计]
-        D2 --> E2[人体区域不融合<br/>保护目标特征]
+    subgraph 创新 2-人体估计
+        A2[问题] --> B2[行人通常在暗部 直接融合会稀释特征]
+        A2 --> C2[不能用 YOLO 检测 低光下检测不准]
+        C2 --> D2[利用特征统计特性 纹理复杂度估计]
+        D2 --> E2[人体区域不融合 保护目标特征]
     end
     
-    subgraph 创新3: 三维权重融合
-        A3[问题] --> B3[不同区域需要<br/>不同融合策略]
-        B3 --> C3[人体权重 × 暗部权重 × 差异权重]
-        C3 --> D3[自适应选择<br/>融合区域]
-        D3 --> E3[智能融合<br/>效果最优]
+    subgraph 创新 3-三维权重
+        A3[问题] --> B3[不同区域需要 不同融合策略]
+        B3 --> C3[人体权重 * 暗部权重 * 差异权重]
+        C3 --> D3[自适应选择 融合区域]
+        D3 --> E3[智能融合 效果最优]
     end
     
-    subgraph 创新4: 残差融合
-        A4[问题] --> B4[直接相加会<br/>破坏原有特征]
-        B4 --> C4[只融合"差异"部分<br/>residual = high - low]
+    subgraph 创新 4-残差融合
+        A4[问题] --> B4[直接相加会 破坏原有特征]
+        B4 --> C4[只融合差异部分 residual = high - low]
         C4 --> D4[背景增强 + 目标保护]
         D4 --> E4[融合更自然]
     end
@@ -293,7 +297,7 @@ graph TB
 
 ---
 
-## 6. 检测头架构
+## 6. 检测头架构（行人检测优化版）
 
 ```mermaid
 graph TB
@@ -313,11 +317,11 @@ graph TB
         
         E --> H[4 个坐标<br/>x,y,w,h]
         F --> I[1 个置信度<br/>obj]
-        G --> J[80 个类别<br/>COOO]
+        G --> J[1 个类别<br/>行人]
     end
     
     subgraph 输出格式
-        H --> K[输出张量<br/>3×H×W×85]
+        H --> K[输出张量<br/>3×H×W×18]
         I --> K
         J --> K
     end
@@ -362,7 +366,7 @@ graph LR
     C --> D[v2.0 配准对齐<br/>16×80×80]
     D --> E[v2.0 人体估计<br/>1×80×80]
     E --> F[v2.0 融合<br/>16×80×80]
-    F --> G[检测头<br/>3×80×80×85]
+    F --> G[检测头<br/>3×80×80×18]
     G --> H[NMS 后处理<br/>N×6]
     H --> I[最终输出<br/>boxes, conf, cls]
     
@@ -495,6 +499,7 @@ graph BT
 | **融合方式** | 直接相加 | ✅ 残差融合 | 保护原特征 |
 | **权重策略** | 一维暗部掩码 | ✅ 三维权重 | 更智能选择 |
 | **目标类型** | 80 类通用 | ✅ 专注行人 | 针对优化 |
+| **检测头** | 255 通道 | ✅ 18 通道 | 参数量减少 14 倍 |
 | **计算开销** | ~25ms | ~30ms | 增加 5ms |
 | **检测效果** | 基线 | ✅ 显著提升 | 行人特征保护 |
 
@@ -536,6 +541,8 @@ python main.py --mode infer --video_path test.mp4 --cache_path cache/feat.pkl
 | **暗部阈值** | 50 (灰度值) |
 | **配准网络** | 3 层卷积 |
 | **人体估计网络** | 5 层卷积 |
+| **检测类别** | 1 (行人) |
+| **检测头输出** | 18 通道 (3×6) |
 | **推理设备** | GPU/CPU/MPS |
 | **目标帧率** | 30+ FPS |
 

@@ -1,7 +1,50 @@
-# Ignore all image files in sample_data directory
-sample_data/**/*.jpg
-sample_data/**/*.jpeg
-sample_data/**/*.png
-sample_data/**/*.gif
-sample_data/**/*.bmp
-sample_data/**/*.webp
+# ==================== 图片文件 ====================
+# 忽略所有图片格式
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.webp
+*.tiff
+*.tif
+*.svg
+*.ico
+
+# 忽略特定目录下的图片
+sample_data/**/*
+test_results/**/*
+debug_images/**/*
+
+# ==================== 日志文件 ====================
+# 忽略所有日志文件
+*.log
+logs/**/*
+
+# ==================== 训练输出 ====================
+runs/**/*
+weights/**/*
+
+# ==================== 缓存文件 ====================
+cache/**/*
+__pycache__/**/*
+*.pyc
+*.pyo
+*.pyd
+
+# ==================== 临时文件 ====================
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ==================== 模型文件 ====================
+*.pt
+*.pth
+*.onnx
+*.pkl
+*.h5
+*.pb
+*.tflite

@@ -13,14 +13,25 @@ from config import Config
 
 class CustomDetectHead(nn.Module):
     """
-    自定义检测头，用于处理融合特征并输出标准格式的检测结果
+    自定义检测头 - 行人检测优化版
+    针对单类别（行人）检测优化，大幅减少参数量和计算量
+    
+    优化点:
+    1. num_classes 从 80 减少到 1 (只检测行人)
+    2. 输出通道从 (5+80)*3=255 减少到 (5+1)*3=18
+    3. 参数量减少约 14 倍
+    4. 推理速度提升
     """
-    def __init__(self, num_classes=80):
+    def __init__(self, num_classes=1):  # 只检测行人
         super(CustomDetectHead, self).__init__()
-        self.num_classes = num_classes
+        self.num_classes = num_classes  # 1 (行人)
         
         # 检测层：输出边界框、置信度和类别
-        # 假设输入特征图有多个尺度
+        # 输入：16 通道
+        # 输出：(5 + num_classes) * 3 = (5+1)*3 = 18 通道
+        #   - 5: 边界框 4 个参数 (x,y,w,h) + 1 个目标置信度
+        #   - 1: 类别概率 (行人)
+        #   - 3: 3 个 anchor
         self.detect = nn.Conv2d(16, (5 + num_classes) * 3, kernel_size=1)
         
     def forward(self, x):
@@ -28,10 +39,12 @@ class CustomDetectHead(nn.Module):
         前向传播
         
         Args:
-            x: 融合特征
+            x: 融合特征 (B, 16, H, W)
             
         Returns:
-            检测结果
+            检测结果 (B, 3, H, W, 6)
+            - 3: 3 个 anchor
+            - 6: 4 个坐标 + 1 个置信度 + 1 个类别
         """
         # 确保特征连续
         x = x.contiguous()
@@ -41,20 +54,20 @@ class CustomDetectHead(nn.Module):
         
         # 调整输出格式
         batch_size = out.shape[0]
-        num_classes = self.num_classes
         
-        # 将输出转换为 [batch, num_anchors, 5+num_classes, grid_h, grid_w]
-        out = out.view(batch_size, 3, 5 + num_classes, -1, out.shape[-1])
+        # 将输出转换为 [batch, num_anchors, grid_h, grid_w, 5+num_classes]
+        # 对于行人检测：[batch, 3, H, W, 6]
+        out = out.view(batch_size, 3, 6, -1, out.shape[-1])
         out = out.permute(0, 1, 3, 4, 2).contiguous()
         
         return out
     
     def postprocess(self, outputs, img_shape, conf_thres=0.35, iou_thres=0.6, max_det=50):
         """
-        后处理方法：将检测头输出转换为标准格式并应用 NMS（优化版）
+        后处理方法：将检测头输出转换为标准格式并应用 NMS（行人检测优化版）
         
         Args:
-            outputs: 检测头输出 [batch, num_anchors, grid_h, grid_w, 5+num_classes]
+            outputs: 检测头输出 [batch, num_anchors, grid_h, grid_w, 6]
             img_shape: 原始图像形状 (H, W)
             conf_thres: 置信度阈值
             iou_thres: NMS IoU 阈值
@@ -64,7 +77,7 @@ class CustomDetectHead(nn.Module):
             标准格式的检测结果
         """
         import torch
-        from torchvision.ops import batched_nms
+        from torchvision.ops import nms
         
         # 获取批次大小
         batch_size = outputs.shape[0]
@@ -84,12 +97,12 @@ class CustomDetectHead(nn.Module):
             num_anchors, grid_h, grid_w, _ = pred.shape
             
             # 展平空间维度
-            pred = pred.reshape(-1, 5 + self.num_classes)
+            pred = pred.reshape(-1, 6)  # 行人检测：5+1=6
             
             # 分离边界框和置信度、类别
             pred_boxes = pred[:, :4]
             obj_conf = torch.sigmoid(pred[:, 4])
-            class_scores = torch.sigmoid(pred[:, 5:])
+            class_score = torch.sigmoid(pred[:, 5])  # 行人检测：只有 1 个类别
             
             # 生成网格坐标
             grid_y = torch.arange(grid_h, device=device)
@@ -118,9 +131,10 @@ class CustomDetectHead(nn.Module):
             y2 = cy + h / 2
             boxes = torch.stack((x1, y1, x2, y2), dim=1)
             
-            # 计算最终置信度
-            class_conf, class_pred = torch.max(class_scores, dim=1)
-            conf = obj_conf * class_conf
+            # 计算最终置信度（行人检测简化版）
+            # 单类别情况下，class_score 就是行人置信度
+            conf = obj_conf * class_score
+            class_pred = torch.zeros(len(conf), dtype=torch.long, device=device)  # 行人类别 ID=0
             
             # 应用置信度阈值
             mask = conf > conf_thres
@@ -141,7 +155,6 @@ class CustomDetectHead(nn.Module):
             class_pred = class_pred[conf_sort_idx]
             
             # 应用 NMS
-            from torchvision.ops import nms
             keep = nms(boxes, conf, iou_thres)
             
             # 获取最终结果
@@ -188,8 +201,8 @@ class YOLOTransformerLowLight(nn.Module):
         # 特征压缩层（用于高清特征）
         self.feature_compress = nn.Conv2d(16, Config.FEATURE_DIM, kernel_size=1)
         
-        # 自定义检测头
-        self.custom_head = CustomDetectHead(num_classes=80)
+        # 自定义检测头（行人检测优化）
+        self.custom_head = CustomDetectHead(num_classes=1)
         
         # 损失权重
         self.dark_loss_weight = Config.DARK_LOSS_WEIGHT
@@ -372,7 +385,7 @@ class YOLOTransformerLowLight(nn.Module):
                 target_h = target_cxywh[:, 3] * grid_h
                 
                 # 为每个真实框计算损失
-                for i in range(len(target)):
+                for i in range(len(target_cls)):
                     # 找到距离真实框中心最近的预测框
                     cx_diff = torch.abs(pred_boxes[:, 0] - target_cx[i])
                     cy_diff = torch.abs(pred_boxes[:, 1] - target_cy[i])
@@ -392,9 +405,10 @@ class YOLOTransformerLowLight(nn.Module):
                     obj_target = torch.ones(k, device=outputs.device)
                     obj_loss += F.binary_cross_entropy_with_logits(pred_obj[topk_idx], obj_target) * obj_gain
                     
-                    # 3. 分类损失 (BCE)
+                    # 3. 分类损失 (BCE) - 行人检测优化
+                    # 单类别情况下，target_cls[i] 应该始终为 0（行人）
                     cls_target = torch.zeros_like(pred_cls[topk_idx])
-                    cls_target[torch.arange(k), target_cls[i]] = 1.0
+                    cls_target[:, 0] = 1.0  # 行人类别
                     cls_loss += F.binary_cross_entropy_with_logits(pred_cls[topk_idx], cls_target) * cls_gain
             
             # 平均损失
@@ -468,15 +482,15 @@ class YOLOTransformerLowLight(nn.Module):
             results = self.custom_head.postprocess(outputs, img_shape)
             postproc_time = time.time() - postproc_start
             
-            # 4. 结果转换
+            # 3. 结果转换
             convert_start = time.time()
-            # 将结果转换为 ultralytics 格式
+            # 将结果转换为 ultralytics 格式（行人检测优化）
             from ultralytics.engine.results import Results
             results_obj = Results(
                 path='image0.jpg',
                 boxes=torch.cat(results, dim=0) if len(results) > 0 and results[0].shape[0] > 0 else torch.zeros((0, 6)),
                 orig_img=image_tensor.squeeze().permute(1, 2, 0).cpu().numpy(),
-                names={i: f'class_{i}' for i in range(80)}
+                names={0: 'person'}  # 只检测行人
             )
             convert_time = time.time() - convert_start
             
