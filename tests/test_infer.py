@@ -7,10 +7,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 from ultralytics import YOLO
-from yolo_transformer import YOLOTransformerLowLight
-from high_res_cache import HighResFeatureCache
-from light_enhance import LightEnhance
-from config import Config
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../models'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../utils'))
+
+from models.yolo_transformer import YOLOTransformerLowLight
+from models.high_res_cache import HighResFeatureCache
+from models.light_enhance import LightEnhance
+from utils.config import Config
 import torch.nn.functional as F
 class TestInfer:
     """
